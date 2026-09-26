@@ -672,9 +672,14 @@ def gateway_spawn_intent_subcommand(command: str | None) -> str | None:
     flag_index = inline_source_flag_index(cased_tokens)
     if flag_index is None:
         return None
-    # Skip the interpreter, its options, ``-c`` and the source literal; then try every suffix —
-    # the embedded argv starts at an unknown offset (the watcher prefixes it with the old PID).
+    # Skip the interpreter, its options, ``-c`` and the source literal. The installed PM launcher
+    # passes Hermes' own argv directly after the source (no repeated executable), while restart
+    # watchers prefix an old PID and a complete command. Try the direct in-process shape first,
+    # then every suffix for wrapper commands.
     start = flag_index + 2
+    direct = _gateway_command_subcommand("hermes " + " ".join(raw_tokens[start:]))
+    if direct is not None:
+        return direct
     for i in range(start, len(cased_tokens)):
         nested = _gateway_command_subcommand(" ".join(raw_tokens[i:]))
         if nested is not None:
@@ -705,7 +710,12 @@ def _record_looks_like_gateway(record: dict[str, Any]) -> bool:
     argv = record.get("argv")
     if record.get("kind") != _GATEWAY_KIND or not isinstance(argv, list) or not argv:
         return False
-    return looks_like_gateway_runtime_command_line(" ".join(str(part) for part in argv))
+    rendered = " ".join(str(part) for part in argv)
+    if argv[0] == "-c":
+        # The installed PM launcher executes a source bootstrap in-process. Python leaves
+        # ``sys.argv[0] == '-c'`` while the actual Hermes argv follows it.
+        rendered = "hermes " + " ".join(str(part) for part in argv[1:])
+    return looks_like_gateway_runtime_command_line(rendered)
 
 
 def _profile_name_for_home(profile_home: Path) -> Optional[str]:
@@ -796,11 +806,19 @@ def _record_matches_live_gateway_pid(
     """True when a live PID still identifies as this gateway record. The live command line wins (a
     stale record's argv must not make a recycled PID count as a gateway; with ``expected_home`` it
     must also belong to that profile — or serve it as the host multiplexer); unreadable cmdline
-    (Windows/EACCES) -> persisted record."""
+    (Windows/EACCES) -> persisted record. A Hermes PM source launcher is the narrow exception: its
+    live identity is ``python -c`` by design, so the matching, start-time-guarded gateway record and
+    canonical spawn-intent parser jointly prove the in-process runtime."""
     live_cmdline = _read_process_cmdline(pid)
     if not live_cmdline:
         return _record_looks_like_gateway(record)
-    if not looks_like_gateway_runtime_command_line(live_cmdline):
+    live_gateway = looks_like_gateway_runtime_command_line(live_cmdline)
+    source_launched_gateway = (
+        not live_gateway
+        and _record_looks_like_gateway(record)
+        and gateway_spawn_intent_subcommand(live_cmdline) == "run"
+    )
+    if not live_gateway and not source_launched_gateway:
         return False
     if expected_home is not None and _host_gateway_serves_home(pid, expected_home):
         return True
