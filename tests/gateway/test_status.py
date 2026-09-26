@@ -374,6 +374,31 @@ class TestGatewayRuntimeStatus:
                 == 139
             ), cmdline
 
+    def test_runtime_status_accepts_live_source_launcher_gateway(self, monkeypatch):
+        """The installed PM launcher runs Hermes through ``python -c``. A matching runtime
+        record must identify that in-process gateway without making arbitrary ``-c`` wrappers
+        pass the strict command-line matcher."""
+        coder_home = Path("/opt/data/profiles/coder")
+        payload = {
+            "pid": 139,
+            "gateway_state": "running",
+            "kind": "hermes-gateway",
+            "argv": ["-c", "gateway", "run", "--external-supervisor"],
+            "start_time": 1000,
+            "hermes_home": str(coder_home),
+        }
+        source_launcher = (
+            "python -I -c \"from hermes_cli.main import main; main()\" "
+            "--profile coder gateway run --external-supervisor"
+        )
+
+        monkeypatch.setattr(status, "_pid_exists", lambda pid: True)
+        monkeypatch.setattr(status, "_get_process_start_time", lambda pid: 1000)
+        monkeypatch.setattr(status, "_read_process_cmdline", lambda pid: source_launcher)
+
+        assert status.looks_like_gateway_command_line(source_launcher) is False
+        assert status.get_runtime_status_running_pid(payload, expected_home=coder_home) == 139
+
 
     def test_command_line_belongs_to_profile_normalizes_separators(self):
         """A Windows argv renders HERMES_HOME with backslashes while the
